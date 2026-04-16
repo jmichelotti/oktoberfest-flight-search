@@ -293,17 +293,17 @@ A single failed search does NOT abort the rest of the session. Record it in the 
 - No pure-business options surfaced under **150k miles** at scrape time. Baseline is 200k from WAS→FRA; watch for drops.
 - Lufthansa (LH) nonstops to FRA appear on united.com results but show "Not available" on the Business (lowest) row — their saver inventory isn't open via MileagePlus right now. Separate Lufthansa Miles&More search may surface different pricing for the same metal.
 
-## Phase 2: Air France / Flying Blue (login validated, date picker TBD)
+## Phase 2: Air France / Flying Blue (form flow solved, blocked by Akamai bot detection)
 
 **Goal:** extend the tracker to cover Air France + KLM awards, priced in Flying Blue miles. AMEX Membership Rewards transfers to Flying Blue 1:1, same economics as UA. This closes the **CDG gap** (United has no nonstop WAS→CDG on Star Alliance; AF 55 runs IAD→CDG daily) and often surfaces lower saver pricing than UA on the same corridors (Flying Blue saver business to Europe typically 55–75k pts with monthly promos).
 
 ### Status
 
-- ✅ Login validated end-to-end (2026-04-15). Account `5346859161` is active. Header shows `JM` avatar post-login.
-- ✅ "Keep me logged in" checkbox available at OTP step — tick before submitting the PIN so subsequent runs skip 2FA.
+- ✅ Login validated end-to-end (2026-04-15). Account `5346859161` is active. Header shows `JM` avatar post-login. "Keep me logged in" cookie persists across `browser_close`.
 - ✅ Book with Miles tab + One-way + Business + station pickers (origin IAD, destination CDG) all drivable via `browser_evaluate`.
-- ⏳ **Remaining work**: the Angular Material date picker (`bw-search-datepicker`) didn't respond to the same click heuristics we used on United. Needs targeted exploration — likely requires clicking the calendar-icon button specifically (not the label row) or dispatching synthetic pointer events. Plan to resolve on the next AF-focused pass.
-- ⏳ Results page selectors not yet mapped (haven't seen a successful search yet).
+- ✅ **Date picker solved (2026-04-15):** the calendar toggle button responds to synthesized `PointerEvent` dispatches (plain `.click()` does not). Once open, "Next month" cycles forward, clicking a day button selects it (adds `bwc-day--selected` class), and a separate **Confirm** button inside the overlay commits the date. See "Date picker — working recipe" below.
+- 🛑 **Blocked — Akamai Bot Manager:** with `Sept 16` locked in and Search flights clicked, the GraphQL endpoint `/gql/v1` (operations `SearchResultAvailableOffersQuery`, `SharedSearchContextPassengersForSearchQuery`) returns **HTTP 403** and the client surfaces it as `ERR_HTTP2_PROTOCOL_ERROR`. Cookie jar carries Akamai Bot Manager markers (`_abck`, `bm_sz`, `bm_mi`, `bm_sv`), and a direct `fetch()` to the GQL URL confirms 403. The results page renders skeleton loaders and "Miles balance 0" — account data never loads. This is detection-of-automation, not a login or rate-limit issue. Needs human-interactive warm-up (real mouse/keyboard jitter over several minutes) or stealth patches to the Playwright profile before the `_abck` cookie is accepted as a "real" browser. **Next session's problem.** Screenshot: `failures/2026-04-15-af-akamai-block.png`.
+- ⏳ Results page selectors not yet mapped — can't map them until the 403 is bypassed.
 
 ### Prerequisites
 
@@ -326,9 +326,81 @@ All IDs captured from the logged-in view. Open the Miles tab first; the form ren
 - **Cabin** `mat-select#mat-select-server-app1` — options after logged-in/award mode: Economy / Premium / Business / La Première. Business is `mat-option-server-app52` at the time of capture (IDs may drift — find by text).
 - **From** `span#bwsfe-station-picker-input-2` — `contenteditable="plaintext-only"`. Set `textContent = 'IAD'`, dispatch `input` + `keyup` events. Autocomplete surfaces `mat-option-server-app75` for Washington IAD.
 - **To** `span#bwsfe-station-picker-input-3` — same pattern. `CDG` surfaces `mat-option-server-app78`.
-- **Departure date** — Angular Material datepicker component `bw-search-datepicker` (class `bw-search-widget__datepicker`). **Interaction pending** — clicking the span/label row does not open the overlay. Likely needs a direct click on the calendar SVG icon button at the right edge of the field, or a synthetic pointer event. Check `cdk-overlay-pane` for the rendered calendar when it does open.
+- **Departure date** — Angular Material datepicker component `bw-search-datepicker` (class `bw-search-widget__datepicker`). See "Date picker — working recipe" below.
 - **Passengers**: `button[aria-label="Add or remove passenger to this trip"]` — keep default 1 adult.
-- **Search flights** button: `button:has-text("Search flights")` (no stable id).
+- **Search flights** button: `button[data-testid="bwsfe-widget__search-button"]` (text: "Search flights").
+
+### Date picker — working recipe (validated 2026-04-15)
+
+Plain `.click()` on the datepicker toggle button does NOT open the overlay — Angular Material requires the full pointer-event sequence. The working approach for every stage (toggle, Next-month, day cell, Confirm) is:
+
+```js
+const firePointerClick = (el) => {
+  const r = el.getBoundingClientRect();
+  const o = {bubbles: true, cancelable: true, clientX: r.left + r.width/2, clientY: r.top + r.height/2, button: 0, pointerType: 'mouse', isPrimary: true};
+  el.dispatchEvent(new PointerEvent('pointerdown', o));
+  el.dispatchEvent(new MouseEvent('mousedown', o));
+  el.dispatchEvent(new PointerEvent('pointerup', o));
+  el.dispatchEvent(new MouseEvent('mouseup', o));
+  el.dispatchEvent(new MouseEvent('click', o));
+};
+```
+
+Full date-selection flow (for target year/month/day, e.g. September 16 2026):
+
+```js
+async () => {
+  // 1. Open overlay
+  const toggle = document.querySelector('[data-testid="bwsfe-datepicker__toggle-button"]');
+  firePointerClick(toggle);
+  await new Promise(r => setTimeout(r, 800));
+
+  const pane = document.querySelector('.cdk-overlay-pane.bwc-date-picker-overlay');
+  const ariaTarget = '16 September 2026'; // day-month-year, 2-digit day
+
+  // 2. Advance months until the target day is rendered.
+  //    The picker appends new months to a virtual-scrolled list (April → April+May → Apr+May+June...),
+  //    so you only need to click Next as many times as months separate today from the target.
+  const next = pane.querySelector('button[aria-label="Next month"]');
+  for (let i = 0; i < 12; i++) {
+    if (pane.querySelector(`button[aria-label="${ariaTarget}"]`)) break;
+    firePointerClick(next);
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  // 3. Click the day cell. It gets class `bwc-day--selected` but overlay stays open.
+  const day = pane.querySelector(`button[aria-label="${ariaTarget}"]`);
+  day.scrollIntoView({block: 'center'});
+  await new Promise(r => setTimeout(r, 200));
+  firePointerClick(day);
+  await new Promise(r => setTimeout(r, 400));
+
+  // 4. Click Confirm (text-match, inside overlay).
+  const confirm = Array.from(pane.querySelectorAll('button')).find(b => /^confirm$/i.test((b.textContent||'').trim()));
+  firePointerClick(confirm);
+  await new Promise(r => setTimeout(r, 600));
+}
+```
+
+After this runs, `.bw-search-datepicker__field-wrapper` innerText reads `"Departure date\nSept 16"` and the overlay is gone. The toggle button may keep `aria-expanded="true"` even after close — ignore that and look for overlay disappearance instead.
+
+### Known blocker: Akamai Bot Manager (2026-04-15)
+
+After the form is filled and Search flights is clicked, `/gql/v1?...&operationName=SearchResultAvailableOffersQuery` returns **HTTP 403**. The cookie jar shows Akamai Bot Manager markers (`_abck`, `bm_sz`, `bm_mi`, `bm_sv`). Things that did **not** fix it:
+
+- Clicking Search via MCP `browser_click` (real Playwright click) vs `browser_evaluate` dispatched click — both blocked.
+- Reloading `/search/flights/0` — still 403 on the GQL call.
+- Navigating from home and re-submitting — still 403.
+
+A direct `fetch('https://wwws.airfrance.us/gql/v1?bookingFlow=LEISURE&operationName=Hello')` from the page context returns **403** with Akamai headers, confirming the block is at the edge, not in the Angular app.
+
+Plausible next steps for the operator (not yet attempted):
+- Open airfrance.us in a real Chrome window on the same machine, do a manual search with genuine mouse movement, then let Playwright pick up the warmed `_abck` cookie. Note: Playwright MCP's internal profile is separate from regular Chrome, so cookies would need to be copied across.
+- Apply `playwright-extra` stealth patches (override `navigator.webdriver`, plugin list, permissions API, etc.) to the MCP-managed Chrome launch. That requires wrapping/replacing the MCP rather than calling it.
+- Route requests through a residential-proxy browser automation service that handles Akamai sensor-data for you.
+- Try KLM.com instead of airfrance.us — same Flying Blue account works, and KLM's anti-bot posture may differ.
+
+Once the block is bypassed, the rest of Phase 2 (results parsing, sheet writes) is still unmapped — haven't seen a rendered flight card yet.
 
 Unlike UA, AF has no equivalent of the "Money + Miles" hybrid mode — the Book with Miles tab only shows award pricing and is gated by Flying Blue login.
 
