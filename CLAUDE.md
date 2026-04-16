@@ -33,13 +33,13 @@ Same pattern as sibling projects `jal-flights-tracker` and `pc-deal-tracker`:
 
 ## ⚠️ Login & 2FA (critical — read this first)
 
-United's **pure award search** (`at=1` param) requires MileagePlus login. First login to this browser profile will also trigger SMS 2FA. **A human must complete the 2FA manually once, with "Remember this browser" checked**, before scheduled runs can work unattended.
+United's **pure award search** (`at=1` param) requires MileagePlus login. Session cookies do NOT persist across `browser_close`, so **every run must log in**. What DOES persist (from the `.playwright-mcp/` profile) is the "Remember this browser" cookie — so as long as that cookie is valid, re-login doesn't trigger SMS 2FA. If the SMS prompt DOES fire, the cookie has been invalidated and a human must complete it once interactively with the checkbox ticked.
 
-Signs you're already authenticated: after any page load, `document.body.innerText` contains "Hi, Justin" and a miles balance.
-
-If the scheduled run lands on a sign-in dialog (password field or MPIDEmailField visible), the cookie has expired. The run should:
-1. Save a failure artifact (screenshot + HTML) and abort with a clear summary.
-2. The next human invocation re-runs interactively, logs in, completes SMS, and checks "Remember this browser".
+Login flow (each run):
+1. Navigate to `https://www.united.com/en/us/`, dismiss cookie banner if present.
+2. Click the "Sign in" button (outer). `MPIDEmailField` textbox appears in a dialog — set value = `UA_USERNAME`, dispatch input+change, click Continue.
+3. `password` field appears. Set value = `UA_PASSWORD` (never log), click the "Sign in" button inside the dialog.
+4. Wait ~5s. If body text contains `Hi, Justin` + miles balance, success. If a "verification code sent to ******NNNN" appears, the Remember-this-browser cookie has lapsed — abort with a failure artifact and surface to the operator.
 
 Do **not** hard-code a way around SMS 2FA. That's a security boundary; we lean on the persistent browser profile instead.
 
@@ -71,86 +71,100 @@ If not logged in, abort this run and save a failure artifact — a human needs t
 
 ### Step 3 — Loop over the 36 combos
 
-For each (origin, destination, date) combo, prefer the **form-submit** path (more reliable than constructing an award URL from scratch). The exact pattern that works:
+For each (origin, destination, date) combo, use the **form-submit** path. Direct award URLs with `at=1` hang indefinitely at "Loading results…" unless submitted through the form first (server-generated `pst` token is required). Per combo:
 
-1. Navigate to `https://www.united.com/en/us/`.
-2. `document.getElementById('travelTab').click()` — activate the Book tab (form renders into the DOM on click).
-3. Wait ~1s. Then fill the form programmatically via `browser_evaluate`:
+1. `browser_navigate` to `https://www.united.com/en/us/`.
+2. `browser_evaluate` — one async call that does ALL form filling, date selection, and submit. Template (substitute ORIGIN, DEST, DAY):
    ```js
-   () => {
-     function setInput(el, val) {
-       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-       setter.call(el, val);
-       el.dispatchEvent(new Event('input', { bubbles: true }));
-       el.dispatchEvent(new Event('change', { bubbles: true }));
-     }
-     // One-way
+   async () => {
+     await new Promise(r => setTimeout(r, 1500));
+     const ORIGIN='<IAD|DCA|BWI>', DEST='<CDG|FRA|ZRH>', DAY=<15|16|17|18>;
+     const tab = document.getElementById('travelTab');
+     if (tab && tab.getAttribute('aria-selected') !== 'true') tab.click();
+     await new Promise(r => setTimeout(r, 800));
      document.getElementById('radiofield-item-id-flightType-1').click();
-     // Award
      const award = document.getElementById('award');
      if (!award.checked) award.click();
-     // Origin + destination
-     setInput(document.getElementById('bookFlightOriginInput'), '<ORIGIN>');
-     setInput(document.getElementById('bookFlightDestinationInput'), '<DEST>');
-   }
-   ```
-4. Set cabin to **Business** (value `2`) once award is enabled. The `cabinType` select changes its option set when the award checkbox is toggled — Business becomes value `2`:
-   ```js
-   () => {
+     await new Promise(r => setTimeout(r, 300));
+     const setInp = (el, v) => {
+       const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+       s.call(el, v);
+       el.dispatchEvent(new Event('input', { bubbles: true }));
+       el.dispatchEvent(new Event('change', { bubbles: true }));
+     };
+     setInp(document.getElementById('bookFlightOriginInput'), ORIGIN);
+     setInp(document.getElementById('bookFlightDestinationInput'), DEST);
      const cabin = document.getElementById('cabinType');
-     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
-     setter.call(cabin, '2');
+     const ss = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+     ss.call(cabin, '2');
      cabin.dispatchEvent(new Event('change', { bubbles: true }));
+     await new Promise(r => setTimeout(r, 400));
+     document.getElementById('DepartDate_start').click();
+     await new Promise(r => setTimeout(r, 900));
+     // Day buttons have NO aria-label when a price overlay is present. Match by text.
+     // Button text is "{day}{price}k" (e.g. "1640k" = day 16, 40k miles).
+     // Picker shows 2 months side-by-side; DOM order places Sep before Oct,
+     // so .find() returns the September cell first.
+     const target = Array.from(document.querySelectorAll('button.rdp-day_button'))
+       .find(b => new RegExp('^' + DAY + '(\\d|$)').test((b.textContent||'').trim()));
+     if (!target) return { error: 'no sept day ' + DAY };
+     target.click();
+     await new Promise(r => setTimeout(r, 400));
+     const find = Array.from(document.querySelectorAll('button'))
+       .find(b => b.getAttribute('aria-label') === 'Find flights' && b.offsetParent !== null);
+     if (!find) return { error: 'no find button' };
+     find.click();
+     return { submitted: true };
    }
    ```
-5. Open the date picker: `document.getElementById('DepartDate_start').click()`. Then navigate to September 2026. The picker shows **2 months side-by-side**. From today's month (April 2026), click `button[aria-label="Next month"]` **4 times** to land on a view where the left month is September. Then click day 16 (or 15/17/18) by matching its button: the day button's text is `{day}{price}k` (e.g. `1640k` = Sept 16, 40k miles — calendar shows the cheapest ANY-cabin price, not business-specific). Verify the button's ancestor caption is `September 2026` before clicking.
-6. Click the "Find flights" button (`button[aria-label="Find flights"]`).
-7. Wait up to ~15 seconds for the results page to load. URL will contain `/fsr/choose-flights?...at=1...` — the `at=1` parameter confirms award mode. If a sign-in dialog opens instead, abort (see Step 2).
-8. **Do NOT use `browser_snapshot` on the results page** — it's 20+ KB. Use `browser_evaluate` with targeted text extraction.
+3. `browser_wait_for` 14s. Results URL contains `&at=1&` and `&pst=<token>&`.
+4. `browser_evaluate` — extract structured data (see Step 4). **Do NOT use `browser_snapshot` on the results page** — it's 20+ KB. Use text extraction.
 
 ### Step 4 — Extract results per combo
 
-Run this in `browser_evaluate`. It splits the results by flight block, extracts all needed fields, and filters for pure business:
+Run this in `browser_evaluate`. Three critical gotchas it handles:
+- **Stops regex**: the card text starts with `NONSTOP` *or* `N STOP` / `N STOPS`. The earlier `^(NONSTOP|\d+)\s*STOPS?` pattern requires "STOP" after the captured group, which fails for NONSTOP. Use `^(NONSTOP|(\d+)\s*STOPS?)` and check group 1 for /nonstop/.
+- **Mixed-cabin scope**: the inline text "Mixed cabin" frequently appears in the *Premium Economy* block of a 1-stop itinerary that still has pure Business available. Only check for "Mixed cabin" within the Business section (between `Business (lowest)` and `Flight Information`), not the whole card.
+- **Flight numbers missing on 1-stop**: United collapses segment detail on 1-stop cards. Flight numbers are only in the DOM if you click "Details" to expand. For the tracker we accept that and fall back to a time+duration+stop fingerprint instead of a flight-number fingerprint.
 
 ```js
 () => {
   const body = document.body.innerText;
   const cards = [];
-  const re = /((?:NONSTOP|\d+\s+STOPS?))[\s\S]*?(?=(?:NONSTOP|\d+\s+STOPS?|$))/g;
+  const re = /((?:NONSTOP|\d+\s+STOPS?))[\s\S]*?(?=(?:NONSTOP|\d+\s+STOPS?|Site Feedback|$))/g;
   let m; while ((m = re.exec(body)) !== null) cards.push(m[0]);
-  const parsed = cards.map(card => {
-    const stopsMatch = card.match(/^(NONSTOP|\d+)\s*STOPS?/i);
-    const stopsNum = !stopsMatch ? null : (stopsMatch[1].toUpperCase() === 'NONSTOP' ? 0 : parseInt(stopsMatch[1], 10));
-    const dep = (card.match(/(\d{1,2}:\d{2}\s*[AP]M)\s*\nDeparting/i) || [])[1] || '';
-    const arr = (card.match(/(\d{1,2}:\d{2}\s*[AP]M)\s*\nArriving/i) || [])[1] || '';
-    const nextDay = /Arrives Sep/i.test(card) ? '+1' : '';
-    const dur = (card.match(/(\d+H,?\s*\d*M?)\s*\nDuration/i) || [])[1] || '';
-    const flights = [...card.matchAll(/(UA|LH|LX|LO|OS|SK|SN|TK|TP|AC|NH|AV|ET|CA|EW)\s*\d{1,4}/gi)]
-      .map(x => x[0].replace(/\s+/,''));
-    const stopAirportMatch = card.match(/Destination[\s\S]{0,100}\n([A-Z]{3})\s*\n[A-Z][a-z]/);
-    const mixed = /Mixed cabin/i.test(card);
-    // Capture the true award rate (post "Select fare for Business (lowest)"):
-    const busMatch = card.match(/Select fare for Business[\s\S]*?(\d+)k?\s*miles\s*\+\s*(\$[\d.]+)/i);
-    const busPts = busMatch ? parseInt(busMatch[1]) * 1000 : null;
-    const busFees = busMatch ? busMatch[2] : '';
-    return { stopsNum, dep, arr, nextDay, dur, flights, stopAirport: stopAirportMatch?.[1] || '', mixed, busPts, busFees };
-  });
-  // Dedupe (United sometimes repeats cards via sticky details)
+  const AM = {UA:'United',LH:'Lufthansa',LX:'Swiss',LO:'LOT',OS:'Austrian',SN:'Brussels',SK:'SAS',TK:'Turkish',TP:'TAP',AC:'Air Canada',NH:'ANA',AV:'Avianca',ET:'Ethiopian',CA:'Air China',EW:'Eurowings'};
   const seen = new Set();
-  return parsed.filter(p => {
-    if (!p.busPts || p.stopsNum === null) return false;
-    if (p.mixed) return false;                 // drop mixed cabin
-    if (p.stopsNum > 1) return false;          // max 1 stop
-    if (!p.flights.length) return false;       // need flight numbers
-    const key = p.flights.join('+') + '|' + p.dep;
+  return cards.map(c => {
+    const t = c.trim();
+    const sm = t.match(/^(NONSTOP|(\d+)\s*STOPS?)/i);
+    const sn = sm ? (/nonstop/i.test(sm[1]) ? 0 : parseInt(sm[2], 10)) : null;
+    const dp = (c.match(/(\d{1,2}:\d{2}\s*[AP]M)\s*\nDeparting/i) || [])[1] || '';
+    const ar = (c.match(/(\d{1,2}:\d{2}\s*[AP]M)\s*\nArriving/i) || [])[1] || '';
+    const nd = /Arrives Sep/i.test(c) ? '+1' : '';
+    const dr = (c.match(/(\d+H,?\s*\d*M?)\s*\nDuration/i) || [])[1] || '';
+    const fl = [...new Set([...c.matchAll(/\b(UA|LH|LX|LO|OS|SK|SN|TK|TP|AC|NH|AV|ET|CA|EW)\s*(\d{1,4})\b/gi)]
+      .map(x => x[1].toUpperCase() + x[2]))];
+    const sa = (c.match(/Destination[^\n]*\(([A-Z]{3})\)\s*\n[A-Z]{3}\s*\n/) || [])[1] || '';
+    // Mixed-cabin detection limited to the Business section only:
+    const busSection = (c.match(/Business\s*\(lowest\)[\s\S]*?(?=\nFlight Information|$)/i) || [''])[0];
+    const busMixed = /Mixed cabin/i.test(busSection);
+    // True saver price (Cardmember rate will be ~10% less and appears earlier in the section):
+    const bm = c.match(/Select fare for Business[\s\S]*?(\d+)k?\s*miles\s*\+\s*(\$[\d.]+)/i);
+    const bp = bm ? parseInt(bm[1]) * 1000 : null;
+    const bf = bm ? bm[2] : '';
+    const al = [...new Set(fl.map(f => AM[f.slice(0,2)] || f.slice(0,2)))].join(', ') || (sn === 0 ? 'United' : 'Unknown');
+    return { sn, dp, ar: ar + nd, dr, fl, sa, mx: busMixed, bp, bf, al };
+  }).filter(p => {
+    if (p.sn === null || p.sn > 1 || !p.bp || p.mx) return false;
+    const key = p.fl.length ? [...p.fl].sort().join('+') : (p.dp + '|' + p.dr + '|' + p.sa);
     if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+    seen.add(key); return true;
   });
 }
 ```
 
-Build per-flight records using this shape:
+Build per-flight records with this shape:
 
 ```json
 {
@@ -172,9 +186,11 @@ Build per-flight records using this shape:
 }
 ```
 
-Airline mapping: UA→United, LH→Lufthansa, LX→Swiss, LO→LOT, OS→Austrian, SN→Brussels, SK→SAS, TK→Turkish, TP→TAP, AC→Air Canada, NH→ANA, AV→Avianca, ET→Ethiopian, CA→Air China, EW→Eurowings.
+**Fingerprint rule:** use flight numbers if present; otherwise fall back to `{Origin}|{Dest}|{Date}|{DepTime}-{Duration}-{StopAirport}` (for 1-stop cards whose flight numbers aren't inline). Strip spaces from DepTime/Duration when building the key.
 
-Between searches, go back to the home URL and re-run Step 3 from the top — the cart tab on the form sometimes retains previous input and causes weirdness. Do NOT close the browser between combos; that wipes state.
+Airline mapping: UA→United, LH→Lufthansa, LX→Swiss, LO→LOT, OS→Austrian, SN→Brussels, SK→SAS, TK→Turkish, TP→TAP, AC→Air Canada, NH→ANA, AV→Avianca, ET→Ethiopian, CA→Air China, EW→Eurowings. When `fl` is empty and `sn === 0`, assume `United` (metal is obvious for a nonstop WAS-FRA/ZRH). Otherwise `Unknown`.
+
+Between searches, always `browser_navigate` back to `https://www.united.com/en/us/` and re-fill from scratch. Do NOT close the browser between combos — that wipes the session cookie and forces a re-login.
 
 **Performance:** budget ~45s per search. If a search exceeds 60s or returns zero cards, save a failure artifact (see below) and continue to the next combo. Do not abort the whole session.
 
@@ -259,12 +275,20 @@ A single failed search does NOT abort the rest of the session. Record it in the 
 
 ## Validated Findings (from first manual run, 2026-04-15)
 
-- Award search URL produced after form submission:
-  `https://www.united.com/en/us/fsr/choose-flights?f=IAD&t=FRA&d=2026-09-16&tt=1&at=1&sc=7&act=2&px=1&pst=<token>&taxng=1&newHP=True&clm=7&st=bestmatches&tqp=A`
-  The `pst` token appears to be server-generated; do not try to construct it — always submit via form.
-- IAD → FRA Sept 16 2026 Business saver = **200,000 miles + $5.60** (UA 989 nonstop 5:25 PM). Cardmember 10% off yields 180k.
-- Calendar overlay prices (e.g. "40k" on Sept 15-18) are the **cheapest ANY cabin** for that day — NOT business-specific. Ignore them; always click into the date and read the Business (lowest) row.
-- Lufthansa LH 419 / LH 417 appear in results but my parser didn't capture their business price — may be "Business Saver" label instead of "Business (lowest)". Iterate on the regex when we see these in production.
+**End-to-end confirmed working on 7 combos** covering all 3 origins and 2 destinations:
+
+- **IAD → FRA** (all 4 dates): 2 nonstops daily — UA989 (5:25 PM, 7h55m) and UA932 (10:10 PM, 8h) — both **200k miles** saver (180k cardmember) + $5.60.
+- **IAD → ZRH** Sept 15: UA52 nonstop (5:45 PM, 8h20m) at **200k miles** + $5.60.
+- **DCA → FRA** Sept 16: 8 pure-business 1-stop options via IAH or EWR, all **200k miles**.
+- **BWI → FRA** Sept 16: 11 pure-business 1-stop options via ORD / IAH / SFO / DEN at **200k** or **245k miles**.
+
+**Key learnings from run:**
+- The direct award URL (`.../choose-flights?...&at=1&...`) hangs at "Loading results…" if opened without first submitting the form in the same session. Always submit through the home-page form.
+- Calendar overlay prices (e.g. "40k" on Sept 15-18) are the **cheapest ANY cabin** for that day — NOT business-specific. Ignore them; always click into the date and read the Business (lowest) row on the results page.
+- Day buttons in the picker have NO aria-label when a price overlay is present. Click by text pattern `^{DAY}(\d|$)` on `button.rdp-day_button`. The picker shows 2 months side-by-side; DOM order places the leftmost month first, so `.find()` returns the September cell.
+- `browser_close` wipes the session cookie but leaves the "Remember this browser" 2FA cookie intact → next run does a plain username+password login without SMS. If SMS prompt appears, the cookie has rolled and a human needs to re-auth interactively.
+- No pure-business options surfaced under **150k miles** at scrape time. Baseline is 200k from WAS→FRA; watch for drops.
+- Lufthansa (LH) nonstops to FRA appear on united.com results but show "Not available" on the Business (lowest) row — their saver inventory isn't open via MileagePlus right now. Separate Lufthansa Miles&More search may surface different pricing for the same metal.
 
 ## Tasks
 
