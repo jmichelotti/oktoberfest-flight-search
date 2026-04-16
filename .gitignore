@@ -1,0 +1,33 @@
+# Service account key + anything else secret
+secrets/
+!secrets/.gitignore
+
+# Actual sheet config (contains private sheet URL) — commit sheet-config.example.json instead
+sheet-config.json
+
+# United credentials
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Logs
+tracker-log.txt
+*.log
+
+# Playwright MCP runtime artifacts
+.playwright-mcp/
+
+# Failure artifacts (screenshots/HTML dumps)
+failures/
+
+# Local Claude Code settings (personal overrides)
+.claude/settings.local.json
+
+# OS cruft
+Thumbs.db
+.DS_Store

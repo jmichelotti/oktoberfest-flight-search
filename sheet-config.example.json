@@ -1,0 +1,7 @@
+{
+  "sheet_url": "https://docs.google.com/spreadsheets/d/REPLACE_WITH_SHEET_ID/edit",
+  "service_account_path": "secrets/sa.json",
+  "snapshot_tab": "Snapshot",
+  "history_tab": "History",
+  "alerts_tab": "Alerts"
+}
