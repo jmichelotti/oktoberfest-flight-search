@@ -455,20 +455,51 @@ Each phase takes ~20 min of real-time scraping. Combined session = ~40 min per s
 ### Status
 
 - ✅ Credentials in `.env` (`AP_USERNAME`, `AP_PASSWORD`). Account is `michelotti12@gmail.com`.
-- ✅ Login form works — Gigya-based login on `aircanada.com/clogin/pages/login`. Native Playwright `pressSequentially` required (Gigya ignores JS `.value` setting). Label elements intercept `browser_click` on inputs; use `browser_type` with ref instead.
-- ✅ 2FA works — email OTP via `gmail_otp.py --poll --sender "aeroplan"` from `jal-flights-tracker` repo. Sender is `info@communications.aeroplan.com`, subject "Verification code to access your account". Phone (SMS to ***845) also available but email preferred for automation.
-- 🛑 **Blocked — Gigya SSO session doesn't persist.** After 2FA completes, page redirects to `aircanada.com/home/...` but the header still shows "Sign in". Checking "Book with Aeroplan points" shows "Please sign in". No `glt_` (Gigya Login Token) cookie is set — only `gig_bootstrap_*` and `ac-sso-cookies-test` exist. The cross-domain SSO handoff from Gigya's auth domain to `www.aircanada.com` fails in Playwright's browser context.
+- ✅ **Login end-to-end working (2026-04-15).** Header shows "Justin" and "0 pts" post-login. "Book with Aeroplan points" toggle works — no "Please sign in" prompt. See login recipe below.
+- ✅ 2FA works via email OTP — `gmail_otp.py --poll --sender "aeroplan"` from `jal-flights-tracker` repo. Sender is `info@communications.aeroplan.com`, subject "Verification code to access your account". Phone SMS (***845) also available but email preferred for automation.
+- ⏳ Award search form filled but not yet submitted — need to explore results page selectors.
 
-### Strategies for next session
+### Login recipe (validated 2026-04-15)
 
-1. **Gigya API login** — bypass the web form entirely. POST to `https://accounts.us1.gigya.com/accounts.login` with API key + credentials, get a `sessionToken`, then set the `glt_` cookie manually on `www.aircanada.com`. Gigya's REST API is well-documented.
-2. **Air Canada mobile API** — many award trackers use AC's mobile/API endpoints directly (JSON responses). If the mobile API accepts Gigya tokens, we can skip the browser entirely for search.
-3. **Manual browser warm-up** — have the user log in once in a real Chrome window sharing the Playwright MCP profile, so the SSO cookies get set by a trusted browser. Then automation reads the warmed session.
-4. **Try aeroplan.com subdomain** — the Aeroplan member portal may have a different auth flow that persists better.
+Gigya's form ignores JS `.value` assignments and has 21 hidden submit buttons. The working approach uses Playwright's native APIs exclusively:
 
-### Form structure (observed but not yet usable)
+1. Navigate to `https://www.aircanada.com/`, click "Sign in" button.
+2. Wait for `aircanada.com/clogin/pages/login` to load.
+3. **Type credentials** using `browser_type` with `slowly: true` (Playwright `pressSequentially`). Label elements intercept `browser_click` on inputs, so use refs from snapshot:
+   - Email: `textbox "Aeroplan number or email"`
+   - Password: `textbox "Password"`
+4. Click "Sign in" button via ref.
+5. Wait for 2FA screen. Click "Send Code" next to the email option:
+   ```js
+   // via browser_evaluate
+   const sendBtns = Array.from(document.querySelectorAll('button'))
+     .filter(b => /^send code$/i.test((b.textContent||'').trim()));
+   sendBtns.find(b => (b.parentElement.textContent||'').includes('@gmail.com')).click();
+   ```
+6. **Poll for OTP**: `python gmail_otp.py --poll --sender "aeroplan" --timeout 60` (from `C:\dev\jal-flights-tracker`).
+7. **Enter code** using `browser_run_code` with `page.locator('input[name="emailCode_0"]').fill(code)`.
+8. **Click Submit** using coordinate-based click (Gigya has 21 hidden submit buttons that break CSS selectors):
+   ```js
+   const codeBox = await page.locator('input[name="emailCode_0"]').boundingBox();
+   await page.mouse.click(codeBox.x + codeBox.width / 2, codeBox.y + codeBox.height + 80);
+   ```
+9. Wait 10-12s for redirect. Page goes to `aircanada.com/home/redirect.html?code=...` then to `aircanada.com/home/us/en/aco/flights`. Header shows "Justin" + "0 pts".
 
-- **"Book with Aeroplan points"**: checkbox `#bkmg-mobile-tablet_searchTypeToggle` — requires login to enable.
+**Critical:** using `page.fill()` (via `browser_run_code`) is essential — `browser_evaluate` with `.value =` does NOT update Gigya's internal state and the form rejects the submission. Similarly, coordinate-based `page.mouse.click()` is the only reliable way to hit the correct Submit button.
+
+**Session persistence:** unknown whether the session persists across `browser_close`. Needs testing. If it doesn't, every run will need the full login + email OTP flow (~30s).
+
+### Gigya API details (captured from network)
+
+- **API key**: `3_zA5TRSBDlwybsx_1k8EyncAfJ2b62DJnoxPW60q4X9MqmBDJh1v_8QYaOTG8kZ8S`
+- **Login endpoint**: `accounts.us1.gigya.com/accounts.login` (POST)
+- **TFA endpoints**: `login.aircanada.com/accounts.tfa.*` (Air Canada's Gigya CNAME)
+- **TFA flow**: `initTFA` → `email.sendVerificationCode` → `email.verifyCode` → `finalizeTFA`
+- The `regToken` from login is reused across all TFA calls.
+
+### Form structure
+
+- **"Book with Aeroplan points"**: checkbox `#bkmg-mobile-tablet_searchTypeToggle` — requires login.
 - **Trip type**: dropdown, default "Round-Trip" (need to set One-Way).
 - **From / To**: airport picker fields (SFO pre-filled from geolocation).
 - **Departure date / Return date**: date fields.
