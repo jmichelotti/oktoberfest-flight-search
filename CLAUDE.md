@@ -1,39 +1,42 @@
 # oktoberfest-flight-search
 
-Automated scraper that runs on a schedule to find **pure-business one-way award tickets** from the Washington DC area to Europe for an Oktoberfest trip. Drives united.com via the Playwright MCP using a logged-in MileagePlus session, filters out mixed-cabin itineraries, and writes results to a Google Sheet.
+Automated scraper that runs on a schedule to find **pure-business one-way award tickets** from the Washington DC area to Europe for an Oktoberfest trip. Drives multiple airline sites via the Playwright MCP using logged-in loyalty-program sessions, filters out mixed-cabin itineraries, and writes results to a Google Sheet.
 
 ## Mission
 
-Catch pure-business-class award availability on United (MileagePlus miles — transferred 1:1 from AMEX Membership Rewards) for one-way WAS → CDG / FRA / ZRH on September 15, 16, 17, or 18, 2026. Capture data on every run so we can see trends, and alert (via Sheet append) on any pure-business itinerary at or below 150k miles.
+Catch pure-business-class award availability for one-way WAS → CDG / FRA / ZRH on September 15, 16, 17, or 18, 2026, using any AMEX Membership Rewards transfer partner. Capture data on every run so we can see trends, and alert (via Sheet append) on any pure-business itinerary at or below 150k points (see `ALERT_THRESHOLD_POINTS`).
+
+**Phase 1 (active):** United MileagePlus — covers United metal + Star Alliance partners (LH, LX, OS, SK, TK, etc.) bookable with UA miles.
+
+**Phase 2 (pending Flying Blue credentials):** Air France / KLM via Flying Blue — covers AF/KL metal + SkyTeam partners, critically the CDG nonstops that UA can't reach. See the Air France section below.
 
 ## Constants (do not change without asking)
 
 - **Origins:** `BWI`, `DCA`, `IAD`
 - **Destinations:** `CDG`, `FRA`, `ZRH`
 - **Dates:** `2026-09-15`, `2026-09-16`, `2026-09-17`, `2026-09-18`
-- **Cabin (v1):** Business only (select value `2` in the home-page form once award is checked)
+- **Cabin (v1):** Business only
 - **Max stops:** 1
-- **Mixed-cabin policy:** reject — any card showing "Mixed cabin" is dropped
+- **Mixed-cabin policy:** reject — any card showing "Mixed cabin" within the Business fare section is dropped
 - **Alert threshold:** `ALERT_THRESHOLD_POINTS` from `.env` (default `150000`)
 - **Passengers:** 1 adult
 - **Trip type:** one-way
-- **Source airline:** united.com MileagePlus award search (requires login)
 
-Total per run: 3 origins × 3 destinations × 4 dates = **36 searches**.
+Per airline, a full run = 3 origins × 3 destinations × 4 dates = **36 searches**.
 
 ## Architecture
 
 Same pattern as sibling projects `jal-flights-tracker` and `pc-deal-tracker`:
 
-- **Playwright MCP** — real Chrome, drives united.com with persistent profile at `.playwright-mcp/`
+- **Playwright MCP** — real Chrome with a persistent browser profile managed by MCP (NOT the `.playwright-mcp/` folder in this repo — that's only runtime logs/snapshots, safe to delete). Profile state is where auth/2FA cookies live and persists across `browser_close`.
 - **`sheet_client.py`** — Google Sheets client with `upsert_snapshot_bulk`, `append_history_bulk`, `append_alerts`
 - **`update_sheet.py`** — CLI wrapper for `init` / debugging
-- **`.env`** — `UA_USERNAME`, `UA_PASSWORD`, `ALERT_THRESHOLD_POINTS`
+- **`.env`** — `UA_USERNAME`, `UA_PASSWORD`, `FB_USERNAME`, `FB_PASSWORD`, `ALERT_THRESHOLD_POINTS`
 - **`secrets/sa.json`** — Google service account key (same SA as the sibling trackers)
 
 ## ⚠️ Login & 2FA (critical — read this first)
 
-United's **pure award search** (`at=1` param) requires MileagePlus login. Session cookies do NOT persist across `browser_close`, so **every run must log in**. What DOES persist (from the `.playwright-mcp/` profile) is the "Remember this browser" cookie — so as long as that cookie is valid, re-login doesn't trigger SMS 2FA. If the SMS prompt DOES fire, the cookie has been invalidated and a human must complete it once interactively with the checkbox ticked.
+United's **pure award search** (`at=1` param) requires MileagePlus login. Session cookies do NOT persist across `browser_close`, so **every run must log in**. What DOES persist (in the Playwright MCP browser profile) is the "Remember this browser" cookie — so as long as that cookie is valid, re-login doesn't trigger SMS 2FA. If the SMS prompt DOES fire, the cookie has been invalidated and a human must complete it once interactively with the checkbox ticked. This cookie lives inside Playwright MCP's internal profile, not in `.playwright-mcp/` in this repo, so routine cleanup of repo files does not wipe it.
 
 Login flow (each run):
 1. Navigate to `https://www.united.com/en/us/`, dismiss cookie banner if present.
@@ -289,6 +292,58 @@ A single failed search does NOT abort the rest of the session. Record it in the 
 - `browser_close` wipes the session cookie but leaves the "Remember this browser" 2FA cookie intact → next run does a plain username+password login without SMS. If SMS prompt appears, the cookie has rolled and a human needs to re-auth interactively.
 - No pure-business options surfaced under **150k miles** at scrape time. Baseline is 200k from WAS→FRA; watch for drops.
 - Lufthansa (LH) nonstops to FRA appear on united.com results but show "Not available" on the Business (lowest) row — their saver inventory isn't open via MileagePlus right now. Separate Lufthansa Miles&More search may surface different pricing for the same metal.
+
+## Phase 2: Air France / Flying Blue (pending credentials)
+
+**Goal:** extend the tracker to cover Air France + KLM awards, priced in Flying Blue miles. AMEX Membership Rewards transfers to Flying Blue 1:1, same economics as UA. This closes the **CDG gap** (United has no nonstop WAS→CDG on Star Alliance; AF 55 runs IAD→CDG daily) and often surfaces lower saver pricing than UA on the same corridors (Flying Blue saver business to Europe typically 55–75k pts with monthly promos).
+
+### Prerequisites (blocking)
+
+- `FB_USERNAME` and `FB_PASSWORD` in `.env` — operator must fill these in before Phase 2 runs. Same Flying Blue account works on both airfrance.us and klm.com. Skip Phase 2 cleanly if either env var is empty.
+- If Flying Blue 2FA is enforced on first login, a human has to complete it interactively once with "Remember this device" (or equivalent) checked, same as we did for United.
+
+### Source
+
+Drive **`https://wwws.airfrance.us/`** and use the on-page **Book with Miles** tab. FlyingBlue.com itself is a loyalty-marketing site with no search form — award search only lives on airfrance.us / klm.com, gated by Flying Blue login.
+
+### Form structure (captured from snapshot 2026-04-15)
+
+- **Tabs**: "Book a flight" (default) and "Book with Miles" — click the Miles tab to switch into award mode.
+- **Trip combobox**: Round trip (default) / One way — switch to One way.
+- **Cabin combobox**: Economy / Premium / Business / La Première — pick Business.
+- **From / To** comboboxes: type IATA code, select from suggestions.
+- **Travel dates** button: opens a calendar picker with miles-price overlay per day (like UA, but the overlay is the real Flying Blue saver price, not the cheapest-cabin price).
+- **Passenger combobox**: 1 adult (default).
+- **Search flights** button.
+
+Once on the Miles tab, the page shows **"Log in to your Flying Blue account to book a ticket with Miles. Log in"** — login is mandatory. No equivalent of UA's "Money + Miles" hybrid mode.
+
+### Run loop (sketch — flesh out during validation)
+
+1. Skip Phase 2 if `FB_USERNAME` or `FB_PASSWORD` is empty. Write a note to the summary.
+2. `browser_navigate` to `https://wwws.airfrance.us/`.
+3. Accept cookie banner (`button:has-text("Accept")`).
+4. Click the Log in button (header) and complete the Flying Blue login flow. Verify with a post-login element (account menu, miles balance, or profile avatar) before proceeding.
+5. Click the **Book with Miles** tab.
+6. For each of the 36 `(origin, destination, date)` combos: set trip type = One way, cabin = Business, origin/destination IATA, pick date from the calendar, click Search.
+7. Extract results (same parser concepts as United; Flying Blue results likely use a different DOM so selectors will need discovery on the first run). Fields to pull: dep/arr times, duration, stops + stop airports, operating airline(s) (AF, KL, DL, KE, etc.), Business miles price + fees, seats left if shown. Flag mixed-cabin only within the Business fare section.
+8. Accumulate into the same `session_results.json` structure as Phase 1. Airline(s) will typically be `Air France`, `KLM`, or a multi-airline chain like `Air France, Delta`.
+9. When Phase 1 (UA) and Phase 2 (AF) both complete, run one combined upsert/history/alert write (so the sheet holds everything from the session).
+
+### Airline mapping additions for Phase 2
+
+`AF → Air France`, `KL → KLM`, `DL → Delta`, `KE → Korean Air`, `VS → Virgin Atlantic`, `MU → China Eastern`, `SU → Aeroflot` (hist.), `RO → TAROM`, `CI → China Airlines`, `KQ → Kenya Airways`.
+
+### Things to watch for during first validation
+
+- Flying Blue **monthly Promo Rewards** can drop biz to ~40–50k one-way on specific corridors, but they're date-specific. If the calendar overlay shows unusually low prices for a specific date, expand into that date and confirm the Business fare (not Economy Promo).
+- AF nonstop IAD→CDG is **AF 55** (evening westbound, morning eastbound). Expect to see it prominently for our dates.
+- KLM routings typically go via AMS (IAD→AMS on KL652, AMS→FRA/ZRH/CDG connections).
+- CDG→FRA/ZRH rerouting: from CDG, client takes the train, so any routing landing at CDG is fine. For FRA or ZRH destinations, AF/KL may route via CDG or AMS with a connecting AF/KL flight.
+
+### Split-vs-combined scheduling
+
+Each phase takes ~20 min of real-time scraping. Combined session = ~40 min per scheduled run. If `claude -p` has issues with that duration under Task Scheduler, split into two scheduler tasks (UA at 08:00, AF at 08:30) using different entry prompts in `run-tracker.bat`. Keep combined for now until we see a problem.
 
 ## Tasks
 
