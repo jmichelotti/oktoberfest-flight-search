@@ -293,17 +293,17 @@ A single failed search does NOT abort the rest of the session. Record it in the 
 - No pure-business options surfaced under **150k miles** at scrape time. Baseline is 200k from WAS→FRA; watch for drops.
 - Lufthansa (LH) nonstops to FRA appear on united.com results but show "Not available" on the Business (lowest) row — their saver inventory isn't open via MileagePlus right now. Separate Lufthansa Miles&More search may surface different pricing for the same metal.
 
-## Phase 2: Air France / Flying Blue (form flow solved, blocked by Akamai bot detection)
+## Phase 2: Flying Blue via KLM.com (end-to-end working)
 
 **Goal:** extend the tracker to cover Air France + KLM awards, priced in Flying Blue miles. AMEX Membership Rewards transfers to Flying Blue 1:1, same economics as UA. This closes the **CDG gap** (United has no nonstop WAS→CDG on Star Alliance; AF 55 runs IAD→CDG daily) and often surfaces lower saver pricing than UA on the same corridors (Flying Blue saver business to Europe typically 55–75k pts with monthly promos).
 
 ### Status
 
 - ✅ Login validated end-to-end (2026-04-15). Account `5346859161` is active. Header shows `JM` avatar post-login. "Keep me logged in" cookie persists across `browser_close`.
-- ✅ Book with Miles tab + One-way + Business + station pickers (origin IAD, destination CDG) all drivable via `browser_evaluate`.
-- ✅ **Date picker solved (2026-04-15):** the calendar toggle button responds to synthesized `PointerEvent` dispatches (plain `.click()` does not). Once open, "Next month" cycles forward, clicking a day button selects it (adds `bwc-day--selected` class), and a separate **Confirm** button inside the overlay commits the date. See "Date picker — working recipe" below.
-- 🛑 **Blocked — Akamai Bot Manager:** with `Sept 16` locked in and Search flights clicked, the GraphQL endpoint `/gql/v1` (operations `SearchResultAvailableOffersQuery`, `SharedSearchContextPassengersForSearchQuery`) returns **HTTP 403** and the client surfaces it as `ERR_HTTP2_PROTOCOL_ERROR`. Cookie jar carries Akamai Bot Manager markers (`_abck`, `bm_sz`, `bm_mi`, `bm_sv`), and a direct `fetch()` to the GQL URL confirms 403. The results page renders skeleton loaders and "Miles balance 0" — account data never loads. This is detection-of-automation, not a login or rate-limit issue. Needs human-interactive warm-up (real mouse/keyboard jitter over several minutes) or stealth patches to the Playwright profile before the `_abck` cookie is accepted as a "real" browser. **Next session's problem.** Screenshot: `failures/2026-04-15-af-akamai-block.png`.
-- ⏳ Results page selectors not yet mapped — can't map them until the 403 is bypassed.
+- ✅ **KLM.com end-to-end working (2026-04-15).** Full search + extraction validated for IAD→CDG 2026-09-16 Business. 6 flights captured (2 nonstops, 4 connecting), results written to Google Sheet.
+- ⛔ **airfrance.us blocked by Akamai Bot Manager** — GraphQL returns 403. Same `_abck`/`bm_sz` cookies. Use **klm.com** instead — same Flying Blue inventory, same credentials, no bot block. Screenshot: `failures/2026-04-15-af-akamai-block.png`.
+- ✅ Date picker works on both AF and KLM using pointer-event recipe (see below). KLM uses "Confirm dates" button text (AF uses "Confirm").
+- ✅ Results extraction working — flight cards parsed from body text (split by "Details\n"), flight numbers extracted from bottom-sheet detail panels opened per-card.
 
 ### Prerequisites
 
@@ -313,22 +313,20 @@ A single failed search does NOT abort the rest of the session. Record it in the 
 
 ### Source
 
-Drive **`https://wwws.airfrance.us/`** and use the on-page **Book with Miles** tab. FlyingBlue.com itself is a loyalty-marketing site with no search form — award search only lives on airfrance.us / klm.com, gated by Flying Blue login.
+Drive **`https://www.klm.com/`** (NOT airfrance.us — blocked by Akamai). Use the on-page **Book with Miles** toggle switch. FlyingBlue.com itself is a loyalty-marketing site with no search form — award search only lives on airfrance.us / klm.com, gated by Flying Blue login. KLM and AF share the same Flying Blue inventory.
 
-### Form structure (validated 2026-04-15 while logged in)
+### Form structure (validated on KLM.com 2026-04-15 while logged in)
 
-All IDs captured from the logged-in view. Open the Miles tab first; the form renders inline on the home page with these elements:
+KLM uses the same AFKL Angular Material form as airfrance.us. Key differences noted below.
 
-- **Tabs** (`[role="tab"]`):
-  - "Book a flight" — default, cash mode
-  - "Book with Miles" — click this; `aria-selected` flips to `true`
-- **Trip** `mat-select#mat-select-server-app0` — options `mat-option-server-app0` (Round trip) and `mat-option-server-app1` (One-way). Click the mat-select, then click the option.
-- **Cabin** `mat-select#mat-select-server-app1` — options after logged-in/award mode: Economy / Premium / Business / La Première. Business is `mat-option-server-app52` at the time of capture (IDs may drift — find by text).
-- **From** `span#bwsfe-station-picker-input-2` — `contenteditable="plaintext-only"`. Set `textContent = 'IAD'`, dispatch `input` + `keyup` events. Autocomplete surfaces `mat-option-server-app75` for Washington IAD.
-- **To** `span#bwsfe-station-picker-input-3` — same pattern. `CDG` surfaces `mat-option-server-app78`.
-- **Departure date** — Angular Material datepicker component `bw-search-datepicker` (class `bw-search-widget__datepicker`). See "Date picker — working recipe" below.
-- **Passengers**: `button[aria-label="Add or remove passenger to this trip"]` — keep default 1 adult.
-- **Search flights** button: `button[data-testid="bwsfe-widget__search-button"]` (text: "Search flights").
+- **"Book with Miles" toggle**: `button#mat-mdc-slide-toggle-server-app0-button` — a `mdc-switch` (NOT a tab like on AF). Use pointer-event dispatch. When on: `mdc-switch--selected mdc-switch--checked`.
+- **Trip** `mat-select[aria-label="Trip"]` — click, then click `mat-option` matching "One-way".
+- **Cabin** `mat-select[aria-label="Select travel class"]` (KLM uses "Select travel class", AF uses "Select a cabin") — click, then click `mat-option` matching "Business".
+- **From** `span#bwsfe-station-picker-input-2` — `contenteditable`. Set `textContent`, dispatch `input` + `keyup`. Click matching `mat-option`.
+- **To** `span#bwsfe-station-picker-input-3` — same pattern.
+- **Departure date** — same `bw-search-datepicker` as AF. See "Date picker — working recipe" below.
+- **Passengers**: keep default 1 adult.
+- **Search flights** button: `button[data-testid="bwsfe-widget__search-button"]`.
 
 ### Date picker — working recipe (validated 2026-04-15)
 
@@ -420,12 +418,31 @@ Unlike UA, AF has no equivalent of the "Money + Miles" hybrid mode — the Book 
 
 `AF → Air France`, `KL → KLM`, `DL → Delta`, `KE → Korean Air`, `VS → Virgin Atlantic`, `MU → China Eastern`, `SU → Aeroflot` (hist.), `RO → TAROM`, `CI → China Airlines`, `KQ → Kenya Airways`.
 
-### Things to watch for during first validation
+### Validated findings (from first KLM.com run, IAD→CDG 2026-09-16)
 
-- Flying Blue **monthly Promo Rewards** can drop biz to ~40–50k one-way on specific corridors, but they're date-specific. If the calendar overlay shows unusually low prices for a specific date, expand into that date and confirm the Business fare (not Economy Promo).
-- AF nonstop IAD→CDG is **AF 55** (evening westbound, morning eastbound). Expect to see it prominently for our dates.
-- KLM routings typically go via AMS (IAD→AMS on KL652, AMS→FRA/ZRH/CDG connections).
-- CDG→FRA/ZRH rerouting: from CDG, client takes the train, so any routing landing at CDG is fine. For FRA or ZRH destinations, AF/KL may route via CDG or AMS with a connecting AF/KL flight.
+**6 flights captured (2 nonstops, 4 connecting), all pure Business:**
+
+- **AF51** — 18:15→08:00+1, nonstop, 7h45, Boeing 777-300, **319,000 Miles** + $349.70
+- **AF53** — 21:45→11:15+1, nonstop, 7h30, Airbus A350-900, **183,000 Miles** + $349.70 (**lowest**)
+- **KL652+AF1241** — 18:10→10:55+1, 1 stop AMS, 10h45, **364,500 Miles** (2 seats left)
+- **KL652+AF1341** — 18:10→12:00+1, 1 stop AMS, 11h50, **364,500 Miles**
+- **KL652+KL1407** — 18:10→13:40+1, 1 stop AMS, 13h30, **319,000 Miles**
+- **DL5076+AF9** — 19:59→12:30+1, 1 stop JFK (Endeavor Air), 10h31, **700,000 Miles**
+
+**Key learnings:**
+- KLM.com bypasses Akamai bot detection that blocks airfrance.us. Same Flying Blue inventory, same credentials.
+- Calendar strip shows miles pricing per day: 176k–319k range across Sept 13–19. Cheapest days are Sun/Thu/Sat at 176k.
+- Fees are **$349.70** across the board — significantly higher than UA's $5.60.
+- Results page uses `[class*="flight-card"]` for card elements; pricing is in sibling elements, not within the card. Parse from body text by splitting on `\nDetails\n`.
+- Flight numbers are only visible in the bottom-sheet detail panel (`bwsfc-flight-details-bottom-sheet`) — click each "Details" button, extract `Operated by: XXNNNN | Aircraft`, then close panel before opening the next.
+- KLM uses "Confirm dates" (not "Confirm") in the datepicker overlay.
+- All connecting flights route via AMS (Schiphol). The IAD→AMS leg is KL652 on all three AMS-connecting options.
+- No promos surfaced at scrape time. Lowest business fare is 183k (AF53 nonstop) — well above 150k threshold.
+
+### Things to watch for
+
+- Flying Blue **monthly Promo Rewards** can drop biz to ~40–50k one-way on specific corridors, but they're date-specific.
+- CDG→FRA/ZRH rerouting: from CDG, client takes the train, so any routing landing at CDG is fine.
 
 ### Split-vs-combined scheduling
 
