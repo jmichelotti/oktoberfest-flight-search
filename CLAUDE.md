@@ -448,6 +448,34 @@ Unlike UA, AF has no equivalent of the "Money + Miles" hybrid mode — the Book 
 
 Each phase takes ~20 min of real-time scraping. Combined session = ~40 min per scheduled run. If `claude -p` has issues with that duration under Task Scheduler, split into two scheduler tasks (UA at 08:00, AF at 08:30) using different entry prompts in `run-tracker.bat`. Keep combined for now until we see a problem.
 
+## Phase 3: Aeroplan (login validated, blocked by Gigya SSO persistence)
+
+**Goal:** search Aeroplan (Air Canada's Star Alliance program) for Lufthansa nonstops to FRA and Swiss nonstops to ZRH. AMEX MR transfers to Aeroplan 1:1. Aeroplan removed fuel surcharges on LH/LX, making it the best program for booking these flights. AMEX cannot transfer directly to Miles & More (LH/LX's own program).
+
+### Status
+
+- ✅ Credentials in `.env` (`AP_USERNAME`, `AP_PASSWORD`). Account is `michelotti12@gmail.com`.
+- ✅ Login form works — Gigya-based login on `aircanada.com/clogin/pages/login`. Native Playwright `pressSequentially` required (Gigya ignores JS `.value` setting). Label elements intercept `browser_click` on inputs; use `browser_type` with ref instead.
+- ✅ 2FA works — email OTP via `gmail_otp.py --poll --sender "aeroplan"` from `jal-flights-tracker` repo. Sender is `info@communications.aeroplan.com`, subject "Verification code to access your account". Phone (SMS to ***845) also available but email preferred for automation.
+- 🛑 **Blocked — Gigya SSO session doesn't persist.** After 2FA completes, page redirects to `aircanada.com/home/...` but the header still shows "Sign in". Checking "Book with Aeroplan points" shows "Please sign in". No `glt_` (Gigya Login Token) cookie is set — only `gig_bootstrap_*` and `ac-sso-cookies-test` exist. The cross-domain SSO handoff from Gigya's auth domain to `www.aircanada.com` fails in Playwright's browser context.
+
+### Strategies for next session
+
+1. **Gigya API login** — bypass the web form entirely. POST to `https://accounts.us1.gigya.com/accounts.login` with API key + credentials, get a `sessionToken`, then set the `glt_` cookie manually on `www.aircanada.com`. Gigya's REST API is well-documented.
+2. **Air Canada mobile API** — many award trackers use AC's mobile/API endpoints directly (JSON responses). If the mobile API accepts Gigya tokens, we can skip the browser entirely for search.
+3. **Manual browser warm-up** — have the user log in once in a real Chrome window sharing the Playwright MCP profile, so the SSO cookies get set by a trusted browser. Then automation reads the warmed session.
+4. **Try aeroplan.com subdomain** — the Aeroplan member portal may have a different auth flow that persists better.
+
+### Form structure (observed but not yet usable)
+
+- **"Book with Aeroplan points"**: checkbox `#bkmg-mobile-tablet_searchTypeToggle` — requires login to enable.
+- **Trip type**: dropdown, default "Round-Trip" (need to set One-Way).
+- **From / To**: airport picker fields (SFO pre-filled from geolocation).
+- **Departure date / Return date**: date fields.
+- **Passengers**: default 1 Adult.
+- **Search**: red "Search" button.
+- No cabin class selector on the form — all cabins shown in results, pick from there.
+
 ## Tasks
 
 Use `TaskCreate`/`TaskUpdate` for each run. Create one "Run Oktoberfest flight session" task at the start, mark in_progress, mark completed at the end.
