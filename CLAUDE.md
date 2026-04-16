@@ -457,7 +457,29 @@ Each phase takes ~20 min of real-time scraping. Combined session = ~40 min per s
 - ✅ Credentials in `.env` (`AP_USERNAME`, `AP_PASSWORD`). Account is `michelotti12@gmail.com`.
 - ✅ **Login end-to-end working (2026-04-15).** Header shows "Justin" and "0 pts" post-login. "Book with Aeroplan points" toggle works — no "Please sign in" prompt. See login recipe below.
 - ✅ 2FA works via email OTP — `gmail_otp.py --poll --sender "aeroplan"` from `jal-flights-tracker` repo. Sender is `info@communications.aeroplan.com`, subject "Verification code to access your account". Phone SMS (***845) also available but email preferred for automation.
-- ⏳ Award search form filled but not yet submitted — need to explore results page selectors.
+- ✅ **First extraction done (2026-04-15).** IAD→FRA 2026-09-16: 41 flights found, 7 Business-class flights at **70K points** written to sheet. All 7 triggered alerts (under 150K threshold). Session persists across `browser_close` — no re-login needed.
+
+### Validated findings (from first Aeroplan run, IAD→FRA 2026-09-16)
+
+**7 Business-class flights at 70K Aeroplan points (= 70K AMEX MR):**
+
+All are 1-stop, operated by United (transatlantic) + Lufthansa (intra-Europe hop). Example: **UA 915** IAD→CDG (777, Polaris lie-flat) + **LH 1027** CDG→FRA (A320, 1h15m). Aeroplan does NOT sell mixed-cabin — all segments are Business when you select from the Business column.
+
+- 09:45→07:10+1, YUL, 15h25m, AC Express + LH, 70K + CA$84 **(1 seat left)**
+- 18:10→10:55+1, CDG, 10h45m, UA + LH, 70K + CA$106
+- 22:30→15:50+1, CDG, 11h20m, UA + LH, 70K + CA$106
+- 18:10→11:35+1, CDG, 11h25m, UA + LH, 70K + CA$106 **(7 seats)**
+- 17:35→11:10+1, AMS, 11h35m, UA + LH, 70K + CA$122 **(5 seats)**
+- 18:10→12:55+1, CDG, 12h45m, UA + LH, 70K + CA$106
+- 17:35→12:25+1, AMS, 12h50m, UA + LH, 70K + CA$122
+
+**Why 70K is legit:** Aeroplan uses a fixed distance-based award chart (US→Europe Business = 70K). United charges 200K and Flying Blue charges 183K for the same metal via dynamic pricing. Aeroplan is the clear winner for FRA/ZRH Business via AMEX transfer.
+
+**4 nonstops exist but Business is "—" (not available):** 2 United (17:25, 22:10) + 2 Lufthansa (15:25, 17:55). All show 40K Economy only. LH saver Business via Aeroplan is not open for Sept 16.
+
+**Fees are in Canadian dollars** (CA$80–CA$122 depending on routing). Roughly USD $58–$89 at current rates.
+
+**Results page structure:** URL pattern is `aircanada.com/aeroplan/redeem/availability/outbound?org0=IAD&dest0=FRA&departureDate0=2026-09-16&ADT=1&tripType=O`. Three fare columns: Economy Class | Premium Economy | Business Class. Parse from body text by splitting on `\d+ of \d+` (flight index). Flight details available via "Details" link on each card (opens modal with leg-by-leg breakdown including flight numbers, aircraft, and duration).
 
 ### Login recipe (validated 2026-04-15)
 
