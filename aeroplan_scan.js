@@ -98,10 +98,16 @@ async (page) => {
     return /Justin|0 pts|My Aeroplan/i.test(text);
   }
 
-  // ---- Check if current page is a results page (vs login redirect) ----
-  async function hasResults() {
+  // ---- Detect page state after navigation ----
+  // Returns: 'results' | 'no_flights' | 'invalid_route' | 'login_redirect' | 'unknown'
+  async function detectPageState() {
     const text = await page.evaluate(() => document.body.innerText);
-    return /flights?\s+found/i.test(text);
+    if (/flights?\s+found/i.test(text)) return 'results';
+    if (/no flights available/i.test(text)) return 'no_flights';
+    if (/we couldn.t find|unable to find|invalid|not.+available.+route|please.+enter.+valid/i.test(text)) return 'invalid_route';
+    const url = page.url();
+    if (/clogin|login/i.test(url)) return 'login_redirect';
+    return 'unknown';
   }
 
   // ---- Extract business flights from current results page ----
@@ -183,6 +189,8 @@ async (page) => {
   const dates = ['2026-09-15', '2026-09-16', '2026-09-17', '2026-09-18'];
   const allResults = [];
   const failures = [];
+  const noFlights = [];   // combos where page loaded fine but no availability
+  const skipped = [];     // combos where airport/route is invalid
   let loginCount = 0;
   let combosDone = 0;
 
@@ -204,16 +212,17 @@ async (page) => {
         try {
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-          // Wait for results or detect login redirect
+          // Wait for results or any terminal state
           try {
-            await page.waitForSelector('text=flights found', { timeout: 20000 });
+            await page.waitForSelector('text=/flights? found|no flights available/i', { timeout: 20000 });
           } catch (e) {
             await page.waitForTimeout(5000);
           }
 
-          // Check if we got redirected to login
-          if (!(await hasResults())) {
-            // Session expired — re-login
+          let state = await detectPageState();
+
+          // If login redirect or unknown, try re-login once
+          if (state === 'login_redirect' || state === 'unknown') {
             const loginOk = await doLogin();
             if (!loginOk) {
               failures.push({ org, dest, date, error: 'Re-login failed' });
@@ -224,15 +233,26 @@ async (page) => {
             // Retry this combo
             await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
             try {
-              await page.waitForSelector('text=flights found', { timeout: 20000 });
+              await page.waitForSelector('text=/flights? found|no flights available/i', { timeout: 20000 });
             } catch (e) {
               await page.waitForTimeout(10000);
             }
+            state = await detectPageState();
+          }
 
-            if (!(await hasResults())) {
-              failures.push({ org, dest, date, error: 'No results after re-login' });
-              continue;
-            }
+          if (state === 'no_flights') {
+            noFlights.push({ org, dest, date });
+            continue;
+          }
+
+          if (state === 'invalid_route') {
+            skipped.push({ org, dest, date, reason: 'invalid route or airport' });
+            continue;
+          }
+
+          if (state !== 'results') {
+            failures.push({ org, dest, date, error: `unknown page state: ${state}` });
+            continue;
           }
 
           await page.waitForTimeout(2000);
@@ -257,6 +277,10 @@ async (page) => {
     combosDone,
     totalFlights: allResults.length,
     loginCount,
+    noFlightsCount: noFlights.length,
+    noFlights,
+    skippedCount: skipped.length,
+    skipped,
     failures: failures.length,
     failureDetails: failures
   };

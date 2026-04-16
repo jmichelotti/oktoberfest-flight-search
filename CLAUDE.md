@@ -251,7 +251,7 @@ Bash: rm session_results.json
 
 URL is in `sheet-config.json`. Three tabs:
 
-- **`Snapshot`** (one row per `Fingerprint`, upserted): `Fingerprint`, `Origin`, `Destination`, `Depart Date`, `Airline(s)`, `Stops`, `Stop Airports`, `Flight Numbers`, `Dep Time`, `Arr Time`, `Duration`, `Cabin`, `Points`, `Fees`, `Seats Left`, `Lowest Points Ever`, `Lowest Points Date Seen`, `First Seen`, `Last Scanned`.
+- **`Snapshot`** (one row per `Fingerprint`, upserted): `Fingerprint`, `Origin`, `Destination`, `Depart Date`, `Airline(s)`, `Stops`, `Stop Airports`, `Flight Numbers`, `Dep Time`, `Arr Time`, `Duration`, `Cabin`, `Points`, `Fees`, `Cash Price (USD)`, `CPP`, `Seats Left`, `Search URL`, `Lowest Points Ever`, `Lowest Points Date Seen`, `First Seen`, `Last Scanned`.
 - **`History`** (append-only): same identity + scan time, no rollups.
 - **`Alerts`** (append-only): scan time, route/date/flights, `Threshold Hit`, `Emailed`.
 
@@ -448,7 +448,7 @@ Unlike UA, AF has no equivalent of the "Money + Miles" hybrid mode — the Book 
 
 Each phase takes ~20 min of real-time scraping. Combined session = ~40 min per scheduled run. If `claude -p` has issues with that duration under Task Scheduler, split into two scheduler tasks (UA at 08:00, AF at 08:30) using different entry prompts in `run-tracker.bat`. Keep combined for now until we see a problem.
 
-## Phase 3: Aeroplan (login validated, blocked by Gigya SSO persistence)
+## Phase 3: Aeroplan (login validated, blocked by Kasada bot detection)
 
 **Goal:** search Aeroplan (Air Canada's Star Alliance program) for Lufthansa nonstops to FRA and Swiss nonstops to ZRH. AMEX MR transfers to Aeroplan 1:1. Aeroplan removed fuel surcharges on LH/LX, making it the best program for booking these flights. AMEX cannot transfer directly to Miles & More (LH/LX's own program).
 
@@ -458,6 +458,7 @@ Each phase takes ~20 min of real-time scraping. Combined session = ~40 min per s
 - ✅ **Login end-to-end working (2026-04-15).** Header shows "Justin" and "0 pts" post-login. "Book with Aeroplan points" toggle works — no "Please sign in" prompt. See login recipe below.
 - ✅ 2FA works via email OTP — `gmail_otp.py --poll --sender "aeroplan"` from `jal-flights-tracker` repo. Sender is `info@communications.aeroplan.com`, subject "Verification code to access your account". Phone SMS (***845) also available but email preferred for automation.
 - ✅ **First extraction done (2026-04-15).** IAD→FRA 2026-09-16: 41 flights found, 7 Business-class flights at **70K points** written to sheet. All 7 triggered alerts (under 150K threshold). Session persists across `browser_close` — no re-login needed.
+- ⛔ **Kasada (KPSDK) bot detection blocking flight results (2026-04-16).** Login still works, calendar data still works, but the `air-bounds` API (flight results) returns empty body (200, 0 bytes). See "Known blocker: Kasada" section below.
 
 ### Validated findings (from first Aeroplan run, IAD→FRA 2026-09-16)
 
@@ -528,6 +529,31 @@ Gigya's form ignores JS `.value` assignments and has 21 hidden submit buttons. T
 - **Passengers**: default 1 Adult.
 - **Search**: red "Search" button.
 - No cabin class selector on the form — all cabins shown in results, pick from there.
+
+### Known blocker: Kasada (KPSDK) bot detection (2026-04-16)
+
+Air Canada's Aeroplan search API is protected by **Kasada** (identified by `x-kpsdk-ct`, `x-kpsdk-cd`, `x-kpsdk-v` request headers and `p.js` client-side SDK at `akamai-gw.dbaas.aircanada.com/{uuid}/{uuid}/p.js`).
+
+**What works:** Login (Gigya SSO), calendar pricing (`air-calendars` endpoint), profile/session APIs.
+
+**What's blocked:** The `air-bounds` endpoint (`POST akamai-gw.dbaas.aircanada.com/loyalty/dapidynamicplus/1ASIUDALAC/v2/search/air-bounds`). Returns HTTP 200 with **empty body** (0 bytes) when Kasada detects Playwright. Direct Python `requests` calls without Kasada tokens return **429**.
+
+**How Kasada detects Playwright:** Kasada's `p.js` generates challenge tokens by fingerprinting the browser at the CDP/engine level. Known signals include `UtilityScript` in `Error.stack` traces (Playwright's code injection mechanism), CDP connection artifacts, and other deep browser internals. These cannot be patched from JavaScript — they're inherent to how Playwright communicates with Chrome via the DevTools Protocol.
+
+**Things tried (all failed):**
+1. Clearing Akamai/Kasada cookies (`_abck`, `bm_sz`, `bm_sv`) → regenerated with same -1 validation
+2. `page.addInitScript()` to patch `Error.stack`, `chrome.runtime`, `navigator.permissions` → sensor still detects automation
+3. Simulated mouse movements, scrolling, human-like delays → no effect on `_abck` validation
+4. Stripping Kasada headers (`x-kpsdk-*`) from `air-bounds` request via `page.route()` → still empty response
+5. Direct Python HTTP call with captured auth tokens, no Kasada headers → 429
+
+**Why it worked on 2026-04-15:** Unknown. Possibilities: (a) Kasada policy was rolled out between April 15–16, (b) the browser profile had cached valid Kasada tokens from an earlier manual session that expired, (c) Kasada has a grace period for new sessions that was exceeded.
+
+**Viable workarounds (not yet attempted):**
+1. **Manual warm-up** — user performs one real search in the MCP browser (genuine mouse/keyboard), generating valid Kasada tokens, then automated scan runs immediately using those tokens before expiry.
+2. **seats.aero / point.me API** — third-party award aggregators that index Aeroplan availability without Kasada protection.
+3. **Playwright stealth patches** (`rebrowser-patches`, `playwright-extra`) — community forks that modify Chrome launch to hide CDP artifacts. Requires modifying the Playwright MCP server configuration.
+4. **Mobile app API** — Aeroplan's mobile API may have different/lighter protection. Requires reverse-engineering the mobile app's API calls.
 
 ## Tasks
 
