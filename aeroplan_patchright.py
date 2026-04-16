@@ -237,6 +237,142 @@ async def extract_flights(page, org: str, dest: str, date: str, url: str) -> lis
     )
 
 
+CAD_TO_USD = 0.73  # approximate conversion rate
+
+
+def parse_price_usd(price_str: str) -> float | None:
+    """Parse '$3,050' or '$1,614' to float."""
+    if not price_str:
+        return None
+    m = re.search(r"\$?([\d,]+)", price_str.replace(",", ""))
+    return float(m.group(1)) if m else None
+
+
+def parse_dep_time_minutes(dep_str: str) -> int | None:
+    """Parse '5:45 PM' or '17:35' to minutes-since-midnight for matching."""
+    m = re.match(r"(\d{1,2}):(\d{2})\s*(AM|PM)?", dep_str.strip(), re.I)
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    ampm = (m.group(3) or "").upper()
+    if ampm == "PM" and h != 12:
+        h += 12
+    elif ampm == "AM" and h == 12:
+        h = 0
+    return h * 60 + mi
+
+
+def fees_to_usd(fee_str: str) -> float:
+    """Convert 'CA$106' or '$5.60' to USD float."""
+    if not fee_str:
+        return 0.0
+    m = re.search(r"CA\s*\$\s*([\d.]+)", fee_str, re.I)
+    if m:
+        return float(m.group(1)) * CAD_TO_USD
+    m = re.search(r"\$\s*([\d.]+)", fee_str)
+    if m:
+        return float(m.group(1))
+    return 0.0
+
+
+def lookup_cash_prices(all_results: list[dict]) -> dict:
+    """Look up cash Business fares from Google Flights via fast-flights.
+
+    Returns dict mapping (org, dest, date) -> list of
+        {dep_minutes: int, price_usd: float, name: str}
+    """
+    from fast_flights import FlightData, Passengers, get_flights as ff_get_flights
+
+    # Collect unique (org, dest, date) combos
+    combos = sorted({(r["Origin"], r["Destination"], r["Depart Date"]) for r in all_results})
+    print(f"\nLooking up cash Business fares for {len(combos)} route+date combos...")
+
+    cash_data: dict[tuple, list] = {}
+    for org, dest, date in combos:
+        label = f"  {org}->{dest} {date}"
+        try:
+            result = ff_get_flights(
+                flight_data=[FlightData(date=date, from_airport=org, to_airport=dest)],
+                trip="one-way",
+                seat="business",
+                passengers=Passengers(adults=1),
+            )
+            flights = []
+            for f in result.flights:
+                price = parse_price_usd(f.price)
+                if price is None:
+                    continue
+                # Extract departure time from string like "5:45 PM on Wed, Sep 16"
+                dep_match = re.match(r"(\d{1,2}:\d{2}\s*[AP]M)", f.departure or "", re.I)
+                dep_min = parse_dep_time_minutes(dep_match.group(1)) if dep_match else None
+                flights.append({
+                    "dep_minutes": dep_min,
+                    "price_usd": price,
+                    "name": f.name or "",
+                    "stops": f.stops or 0,
+                })
+            cash_data[(org, dest, date)] = flights
+            prices = [f["price_usd"] for f in flights]
+            if prices:
+                print(f"{label}: {len(flights)} fares, ${min(prices):,.0f}-${max(prices):,.0f}")
+            else:
+                print(f"{label}: no fares found")
+        except Exception as e:
+            print(f"{label}: ERROR ({str(e)[:80]})")
+            cash_data[(org, dest, date)] = []
+
+    return cash_data
+
+
+def enrich_with_cash_prices(all_results: list[dict], cash_data: dict) -> None:
+    """Add Cash Price (USD) and CPP to each result using cash fare data."""
+    for r in all_results:
+        key = (r["Origin"], r["Destination"], r["Depart Date"])
+        fares = cash_data.get(key, [])
+        if not fares:
+            continue
+
+        dep_min = parse_dep_time_minutes(r.get("Dep Time", ""))
+        stops = r.get("Stops", 0)
+        cash_price = None
+        match_type = None
+
+        # Try exact match: same departure time (within 30 min) and same stops
+        if dep_min is not None:
+            candidates = [
+                f for f in fares
+                if f["dep_minutes"] is not None
+                and abs(f["dep_minutes"] - dep_min) <= 30
+                and f["stops"] == stops
+            ]
+            if candidates:
+                # Pick the one closest in departure time
+                best = min(candidates, key=lambda f: abs(f["dep_minutes"] - dep_min))
+                cash_price = best["price_usd"]
+                match_type = "exact"
+
+        # Fallback: same stop count, cheapest
+        if cash_price is None:
+            same_stops = [f for f in fares if f["stops"] == stops]
+            if same_stops:
+                cash_price = min(f["price_usd"] for f in same_stops)
+                match_type = "same-stops-min"
+
+        # Last resort: cheapest overall
+        if cash_price is None:
+            cash_price = min(f["price_usd"] for f in fares)
+            match_type = "route-min"
+
+        r["Cash Price (USD)"] = round(cash_price)
+
+        # CPP = (cash_price - fees_in_usd) / points * 100
+        points = r.get("Points", 0)
+        if points > 0:
+            fees_usd = fees_to_usd(r.get("Fees", ""))
+            cpp = (cash_price - fees_usd) / points * 100
+            r["CPP"] = round(cpp, 1)
+
+
 async def run_scan(test_mode: bool = False):
     from patchright.async_api import async_playwright
 
@@ -360,6 +496,14 @@ async def run_scan(test_mode: bool = False):
 
         await context.close()
 
+    # Look up cash prices and calculate CPP
+    if all_results:
+        cash_data = lookup_cash_prices(all_results)
+        enrich_with_cash_prices(all_results, cash_data)
+        cpp_values = [r["CPP"] for r in all_results if r.get("CPP")]
+        if cpp_values:
+            print(f"CPP range: {min(cpp_values):.1f} - {max(cpp_values):.1f} cents/point")
+
     # Write results
     with open(RESULTS_PATH, "w") as f:
         json.dump(all_results, f, indent=2)
@@ -414,6 +558,11 @@ print(f'Alert count: {{len(alerts)}}')
         print(f"Min points: {min_pts:,} ({min_flights[0]['Origin']}->{min_flights[0]['Destination']} {min_flights[0]['Depart Date']})")
         alerts = [r for r in all_results if r["Points"] <= threshold]
         print(f"Alerts (under {threshold//1000}k): {len(alerts)}")
+        cpp_vals = [r["CPP"] for r in all_results if r.get("CPP")]
+        if cpp_vals:
+            best_cpp = max(cpp_vals)
+            best = [r for r in all_results if r.get("CPP") == best_cpp][0]
+            print(f"Best CPP: {best_cpp:.1f} cpp ({best['Origin']}->{best['Destination']} {best['Depart Date']}, ${best.get('Cash Price (USD)', '?')} cash / {best['Points']:,} pts)")
 
     if no_flights:
         print(f"\nNo-flights combos:")
