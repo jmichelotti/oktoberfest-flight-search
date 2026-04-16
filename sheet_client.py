@@ -32,6 +32,7 @@ SNAPSHOT_COLUMNS = [
     "Points",
     "Fees",
     "Seats Left",
+    "Search URL",
     "Lowest Points Ever",
     "Lowest Points Date Seen",
     "First Seen",
@@ -55,6 +56,7 @@ HISTORY_COLUMNS = [
     "Points",
     "Fees",
     "Seats Left",
+    "Search URL",
 ]
 
 ALERT_COLUMNS = [
@@ -72,6 +74,7 @@ ALERT_COLUMNS = [
     "Points",
     "Fees",
     "Seats Left",
+    "Search URL",
     "Threshold Hit",
     "Emailed",
 ]
@@ -273,6 +276,7 @@ class SheetClient:
                 _to_int(cell.get("Points")) or "",
                 cell.get("Fees", ""),
                 cell.get("Seats Left", ""),
+                cell.get("Search URL", ""),
             ])
         start_row = self._next_empty_row(ws)
         self._ensure_capacity(ws, start_row + len(rows))
@@ -305,6 +309,7 @@ class SheetClient:
                 _to_int(a.get("Points")) or "",
                 a.get("Fees", ""),
                 a.get("Seats Left", ""),
+                a.get("Search URL", ""),
                 a.get("Threshold Hit", ""),
                 "",
             ])
@@ -335,6 +340,7 @@ def _snapshot_row(cell: dict, pts: int, low_pts: int, low_date: str,
         pts if pts > 0 else "",
         cell.get("Fees", ""),
         cell.get("Seats Left", ""),
+        cell.get("Search URL", ""),
         low_pts if low_pts > 0 else "",
         low_date if low_pts > 0 else "",
         first_seen,
