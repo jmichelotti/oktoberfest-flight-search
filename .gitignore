@@ -22,6 +22,9 @@ tracker-log.txt
 # Playwright MCP runtime artifacts
 .playwright-mcp/
 
+# Patchright persistent browser profile (Aeroplan sessions)
+.patchright-profile/
+
 # Failure artifacts (screenshots/HTML dumps)
 failures/
 
