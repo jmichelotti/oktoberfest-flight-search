@@ -22,11 +22,18 @@ tracker-log.txt
 # Playwright MCP runtime artifacts
 .playwright-mcp/
 
-# Patchright persistent browser profile (Aeroplan sessions)
+# Persistent browser profiles (Aeroplan sessions)
 .patchright-profile/
+.nodriver-profile/
+.cloakbrowser-profile/
+.chrome-cdp-profile/
+.camoufox-profile/
 
 # Failure artifacts (screenshots/HTML dumps)
 failures/
+
+# Scan result JSONs (historical record, not committed)
+scans/
 
 # Local Claude Code settings (personal overrides)
 .claude/settings.local.json

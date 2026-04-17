@@ -17,7 +17,7 @@ Catch pure-business-class award availability for one-way WAS → CDG / FRA / ZRH
 - **Dates:** `2026-09-15`, `2026-09-16`, `2026-09-17`, `2026-09-18`
 - **Cabin (v1):** Business only
 - **Max stops:** 1
-- **Mixed-cabin policy:** reject — any card showing "Mixed cabin" within the Business fare section is dropped
+- **Mixed-cabin policy:** Aeroplan shows a "X% in Business Class" indicator on fare cells via a hidden `.mixed-cabin-percentage` div. Flights with ≥85% in Business pass; below 85% are rejected. 100% Business flights have no such div. United uses a "Mixed cabin" text marker instead — reject any card showing it within the Business fare section.
 - **Alert threshold:** `ALERT_THRESHOLD_POINTS` from `.env` (default `150000`)
 - **Passengers:** 1 adult
 - **Trip type:** one-way
@@ -29,6 +29,8 @@ Per airline, a full run = 3 origins × 3 destinations × 4 dates = **36 searches
 Same pattern as sibling projects `jal-flights-tracker` and `pc-deal-tracker`:
 
 - **Playwright MCP** — real Chrome with a persistent browser profile managed by MCP (NOT the `.playwright-mcp/` folder in this repo — that's only runtime logs/snapshots, safe to delete). Profile state is where auth/2FA cookies live and persists across `browser_close`.
+- **`aeroplan-extension/`** — Chrome extension for Aeroplan scans. User loads it unpacked, clicks "Start Scan", it navigates 36 combos in a tab and downloads a JSON file. Bypasses Kasada by running in the user's real browser.
+- **`ingest_scan.py`** — Ingests a scan JSON (from the extension or `scans/`), looks up cash prices, writes to Google Sheet. Auto-finds the latest scan if no path given. Copies files to `scans/` for historical record.
 - **`sheet_client.py`** — Google Sheets client with `upsert_snapshot_bulk`, `append_history_bulk`, `append_alerts`
 - **`update_sheet.py`** — CLI wrapper for `init` / debugging
 - **`.env`** — `UA_USERNAME`, `UA_PASSWORD`, `FB_USERNAME`, `FB_PASSWORD`, `ALERT_THRESHOLD_POINTS`
@@ -458,14 +460,15 @@ Each phase takes ~20 min of real-time scraping. Combined session = ~40 min per s
 - ✅ **Login end-to-end working (2026-04-15).** Header shows "Justin" and "0 pts" post-login. "Book with Aeroplan points" toggle works — no "Please sign in" prompt. See login recipe below.
 - ✅ 2FA works via email OTP — `gmail_otp.py --poll --sender "aeroplan"` from `jal-flights-tracker` repo. Sender is `info@communications.aeroplan.com`, subject "Verification code to access your account". Phone SMS (***845) also available but email preferred for automation.
 - ✅ **First extraction done (2026-04-15).** IAD→FRA 2026-09-16: 41 flights found, 7 Business-class flights at **70K points** written to sheet. All 7 triggered alerts (under 150K threshold). Session persists across `browser_close` — no re-login needed.
-- ⛔ **Kasada (KPSDK) bot detection blocks standard Playwright (2026-04-16).** Login works via MCP but `air-bounds` API returns empty results. See "Known blocker: Kasada" section below.
-- ✅ **Patchright bypass working (2026-04-16).** `aeroplan_patchright.py` uses Patchright (stealth Playwright fork) to avoid Kasada's `Runtime.Enable` CDP detection. Full 36-combo scan: 264 Business flights, 109 alerts under 150K, 0 failures. Run with `python aeroplan_patchright.py`.
+- ⛔ **Kasada (KPSDK) bot detection blocks ALL automation tools (confirmed 2026-04-17).** Kasada updated detection to catch Patchright, rebrowser-playwright, CloakBrowser, nodriver, Camoufox, and plain CDP connections. The `_abck` cookie always returns `~-1~` (invalid). See "Known blocker: Kasada" section below.
+- ✅ **Chrome extension bypass working (2026-04-17).** `aeroplan-extension/` is a Chrome extension the user loads manually. It opens each of 36 combos in a tab, extracts Business fare cells from the DOM, and downloads a JSON file. The user's real Chrome passes Kasada naturally. Run `python ingest_scan.py` to write the JSON to the Google Sheet.
+- ✅ **Mixed-cabin filtering working (2026-04-17).** Aeroplan shows "X% in Business Class" in a hidden `.mixed-cabin-percentage` div on fare cells. Flights ≥85% pass; below 85% are rejected. 100% Business flights have no such div. Configurable via `MIXED_CABIN_MIN_PCT` in `aeroplan_patchright.py`.
 
 ### Validated findings (from first Aeroplan run, IAD→FRA 2026-09-16)
 
 **7 Business-class flights at 70K Aeroplan points (= 70K AMEX MR):**
 
-All are 1-stop, operated by United (transatlantic) + Lufthansa (intra-Europe hop). Example: **UA 915** IAD→CDG (777, Polaris lie-flat) + **LH 1027** CDG→FRA (A320, 1h15m). Aeroplan does NOT sell mixed-cabin — all segments are Business when you select from the Business column.
+All are 1-stop, operated by United (transatlantic) + Lufthansa (intra-Europe hop). Example: **UA 915** IAD→CDG (777, Polaris lie-flat) + **LH 1027** CDG→FRA (A320, 1h15m). Aeroplan DOES show mixed-cabin itineraries in the Business column — a hidden `.mixed-cabin-percentage` div indicates what percentage is actually in Business (e.g. "92% in Business Class"). See mixed-cabin filtering above.
 
 - 09:45→07:10+1, YUL, 15h25m, AC Express + LH, 70K + CA$84 **(1 seat left)**
 - 18:10→10:55+1, CDG, 10h45m, UA + LH, 70K + CA$106
@@ -565,7 +568,7 @@ Use `TaskCreate`/`TaskUpdate` for each run. Create one "Run Oktoberfest flight s
 - Never commit anything under `secrets/`, `.env`, or `.playwright-mcp/`.
 - Never log `UA_PASSWORD` or the SMS 2FA code.
 - Never use `mcp__playwright__browser_snapshot` on the results page — it's too large. Use `browser_evaluate` with targeted queries.
-- Do not include mixed-cabin itineraries — filter them via the "Mixed cabin" text marker.
+- Do not include mixed-cabin itineraries below 85% Business — filter via `.mixed-cabin-percentage` div on Aeroplan, "Mixed cabin" text on United.
 - Do not include itineraries with more than 1 stop.
 - Do not try to construct the award URL (`at=1&...`) yourself — submit via the form each time (server-generated `pst` token).
 - Do not create new Python source files or markdown docs beyond what exists.

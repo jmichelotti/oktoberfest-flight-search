@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { width: 360px; padding: 16px; font-family: system-ui, sans-serif; font-size: 13px; }
+  h2 { margin: 0 0 12px; font-size: 16px; }
+  #status { margin: 12px 0; padding: 8px; background: #f0f0f0; border-radius: 4px; min-height: 20px; }
+  #progress { margin: 8px 0; }
+  #progressBar { width: 100%; height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden; }
+  #progressFill { height: 100%; background: #c41230; width: 0%; transition: width 0.3s; }
+  button { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; margin-right: 8px; }
+  #startBtn { background: #c41230; color: white; }
+  #startBtn:disabled { background: #ccc; cursor: default; }
+  #stopBtn { background: #666; color: white; display: none; }
+  #results { margin-top: 12px; font-size: 12px; max-height: 200px; overflow-y: auto; }
+  .stat { display: flex; justify-content: space-between; padding: 2px 0; }
+  .stat .label { color: #666; }
+  .warn { color: #c41230; font-weight: bold; }
+</style>
+</head>
+<body>
+  <h2>Aeroplan Scanner</h2>
+  <div id="loginCheck"></div>
+  <div>
+    <button id="startBtn">Start Scan (36 combos)</button>
+    <button id="stopBtn">Stop</button>
+  </div>
+  <div id="progress">
+    <div id="progressBar"><div id="progressFill"></div></div>
+  </div>
+  <div id="status">Ready. Make sure you're logged into Aeroplan.</div>
+  <div id="results"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

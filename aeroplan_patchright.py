@@ -161,79 +161,169 @@ async def detect_page_state(page) -> str:
     return "unknown"
 
 
+MIXED_CABIN_MIN_PCT = 85
+
+
 async def extract_flights(page, org: str, dest: str, date: str, url: str) -> list[dict]:
-    """Extract Business-class flights from the current results page."""
+    """Extract Business-class flights from the current results page.
+
+    Uses DOM-based extraction: reads fare cells via their aria-label and class
+    attributes, extracts flight numbers from encoded CSS classes, and checks
+    for mixed-cabin percentage via the hidden .mixed-cabin-percentage element.
+    """
     return await page.evaluate(
-        """({ org, dest, date, url }) => {
+        """({ org, dest, date, url, minPct }) => {
       const body = document.body.innerText;
       const totalMatch = body.match(/(\\d+)\\s+flights?\\s+found/i);
       if (!totalMatch) return [];
 
-      const sections = body.split(/\\d+ of \\d+/);
+      // --- DOM-based extraction of Business fare cells ---
+      const bizCells = document.querySelectorAll('[class*="flight-cabin-cell"][aria-label*="Business Class"]');
       const results = [];
+      const seen = new Set();
 
-      for (let i = 1; i < sections.length; i++) {
-        const s = sections[i];
-        const depMatch = s.match(/(\\d{1,2}:\\d{2})\\s*\\n(Non-stop|1 stop)/);
-        if (!depMatch) continue;
+      for (const cell of bizCells) {
+        const aria = cell.getAttribute('aria-label') || '';
+        const cls = cell.className || '';
 
-        const stops = depMatch[2] === 'Non-stop' ? 0 : 1;
-        const durMatch = s.match(/(\\d+hr\\d*m?)/);
-        const arrMatch = s.match(/\\+\\d\\s*\\n(\\d{1,2}:\\d{2})/);
-        const opMatch = s.match(/(?:Operated by|Includes travel operated by)\\s+([^\\n]+)/);
+        // Parse points from aria-label: "seats from 70000 points plus $105.10 CANADIAN DOLLAR"
+        const ptsMatch = aria.match(/from\\s+(\\d+)\\s+points/i);
+        if (!ptsMatch) continue;
+        const pts = parseInt(ptsMatch[1]);
 
-        const fareList = [];
-        const farePattern = /([\\d.]+K)\\s*\\n\\s*\\+\\s*CA\\s*\\$(\\d+)|\\u2014/g;
-        let m;
-        while ((m = farePattern.exec(s)) !== null) {
-          if (m[0] === '\\u2014') fareList.push(null);
-          else fareList.push({ pts: m[1], fee: 'CA$' + m[2] });
+        // Parse fees
+        const feeMatch = aria.match(/plus\\s+\\$(\\d+\\.?\\d*)\\s+CANADIAN/i);
+        const fee = feeMatch ? 'CA$' + feeMatch[1] : '';
+
+        // Parse seats left
+        const seatsMatch = aria.match(/(\\d+)\\s+seats?\\s+left/i);
+        const seatsLeft = seatsMatch ? seatsMatch[1] : '';
+
+        // Mixed-cabin check: look for .mixed-cabin-percentage child (present in DOM even when hidden)
+        const mixedEl = cell.querySelector('.mixed-cabin-percentage');
+        let bizPct = 100;
+        if (mixedEl) {
+          const pctMatch = mixedEl.textContent.match(/(\\d+)%/);
+          if (pctMatch) bizPct = parseInt(pctMatch[1]);
+        }
+        if (bizPct < minPct) continue;
+
+        // Extract flight segments from class: business-SEG-UA3431-IADYYZ-2026-09-16-0819-SEG-AC840-YYZFRA-...
+        const segPattern = /SEG-([A-Z]{2}\\d+)-([A-Z]{3})([A-Z]{3})-\\d{4}-\\d{2}-\\d{2}-(\\d{4})/g;
+        const segments = [];
+        let sm;
+        while ((sm = segPattern.exec(cls)) !== null) {
+          segments.push({ flight: sm[1], from: sm[2], to: sm[3], time: sm[4] });
         }
 
-        const bizFare = fareList[2] || null;
-        if (!bizFare) continue;
+        const flightNums = segments.map(s => s.flight);
+        const stopAirports = [];
+        if (segments.length > 1) {
+          for (let i = 0; i < segments.length - 1; i++) {
+            stopAirports.push(segments[i].to);
+          }
+        }
+        const stops = Math.max(0, segments.length - 1);
         if (stops > 1) continue;
 
-        const ptsNum = Math.round(parseFloat(bizFare.pts.replace('K', '')) * 1000);
-        const stopMatch = s.match(/\\n([A-Z]{3})\\s*(?:-\\s*[A-Z]{3})?\\s*\\n\\+\\s*\\d+h/);
-        const stopAirport = stops === 1 && stopMatch ? stopMatch[1] : '';
-        const seatsMatch = s.match(/(\\d+)\\s+seats?\\s+left/i);
+        // Build fingerprint from flight numbers
+        const flightStr = flightNums.join('+');
+        const fp = flightStr
+          ? org + '|' + dest + '|' + date + '|' + flightStr
+          : org + '|' + dest + '|' + date + '|' + pts;
+        if (seen.has(fp)) continue;
+        seen.add(fp);
 
-        const dep = depMatch[1];
-        const arr = arrMatch ? arrMatch[1] : '';
-        const dur = durMatch ? durMatch[1] : '';
-        const operator = opMatch ? opMatch[1].trim()
-          .replace(/Includes travel operated by /i, '')
-          .replace(/Operated by /i, '') : '';
+        // Get dep/arr/duration from the flight card row (walk up to find it)
+        let depTime = '', arrTime = '', duration = '', operator = '';
+        let row = cell.closest('[class*="bound-row"], [class*="flight-row"], [class*="bound-card"]');
+        if (!row) row = cell.parentElement?.parentElement;
+        if (row) {
+          const rowText = row.innerText || '';
+          const depM = rowText.match(/(\\d{1,2}:\\d{2})\\s*\\n(Non-stop|1 stop)/);
+          if (depM) depTime = depM[1];
+          const durM = rowText.match(/(\\d+hr\\d*m?)/);
+          if (durM) duration = durM[1];
+          const arrM = rowText.match(/\\+\\d\\s*\\n(\\d{1,2}:\\d{2})/);
+          if (arrM) arrTime = arrM[1] + '+1';
+          const opM = rowText.match(/(?:Operated by|Includes travel operated by)\\s+([^\\n]+)/);
+          if (opM) operator = opM[1].trim().replace(/Includes travel operated by /i, '').replace(/Operated by /i, '');
+        }
 
-        const depClean = dep.replace(/:/g, '');
-        const durClean = dur.replace(/\\s/g, '');
-        const fp = stops === 0
-          ? `${org}|${dest}|${date}|${depClean}-${durClean}-nonstop`
-          : `${org}|${dest}|${date}|${depClean}-${durClean}-${stopAirport}`;
+        // Airline mapping from flight codes
+        const AM = {UA:'United',LH:'Lufthansa',LX:'Swiss',LO:'LOT',OS:'Austrian',SN:'Brussels',SK:'SAS',TK:'Turkish',TP:'TAP',AC:'Air Canada',NH:'ANA',AV:'Avianca',ET:'Ethiopian',CA:'Air China',EW:'Eurowings',AF:'Air France',KL:'KLM',DL:'Delta'};
+        const airlines = [...new Set(flightNums.map(f => AM[f.slice(0,2)] || f.slice(0,2)))].join(', ');
 
         results.push({
           Fingerprint: fp,
           Origin: org,
           Destination: dest,
           'Depart Date': date,
-          'Airline(s)': operator,
+          'Airline(s)': airlines || operator || 'Unknown',
           Stops: stops,
-          'Stop Airports': stopAirport,
-          'Flight Numbers': '',
-          'Dep Time': dep,
-          'Arr Time': arr ? arr + '+1' : '',
-          Duration: dur.replace('hr', 'H, ').replace('m', 'M'),
+          'Stop Airports': stopAirports.join(', '),
+          'Flight Numbers': flightStr,
+          'Dep Time': depTime,
+          'Arr Time': arrTime,
+          Duration: duration.replace('hr', 'H, ').replace('m', 'M'),
           Cabin: 'Business',
-          Points: ptsNum,
-          Fees: bizFare.fee,
-          'Seats Left': seatsMatch ? seatsMatch[1] : '',
+          'Business Pct': bizPct,
+          Points: pts,
+          Fees: fee,
+          'Seats Left': seatsLeft,
           'Search URL': url
         });
       }
+
+      // Fallback: if DOM extraction found nothing, try text-based extraction
+      if (results.length === 0) {
+        const sections = body.split(/\\d+ of \\d+/);
+        for (let i = 1; i < sections.length; i++) {
+          const s = sections[i];
+          const depMatch = s.match(/(\\d{1,2}:\\d{2})\\s*\\n(Non-stop|1 stop)/);
+          if (!depMatch) continue;
+          const stops = depMatch[2] === 'Non-stop' ? 0 : 1;
+          if (stops > 1) continue;
+          const durMatch = s.match(/(\\d+hr\\d*m?)/);
+          const arrMatch = s.match(/\\+\\d\\s*\\n(\\d{1,2}:\\d{2})/);
+          const opMatch = s.match(/(?:Operated by|Includes travel operated by)\\s+([^\\n]+)/);
+          const farePattern = /([\\d.]+K)\\s*\\n\\s*\\+\\s*CA\\s*\\$(\\d+)|\\u2014/g;
+          const fareList = [];
+          let m;
+          while ((m = farePattern.exec(s)) !== null) {
+            if (m[0] === '\\u2014') fareList.push(null);
+            else fareList.push({ pts: m[1], fee: 'CA$' + m[2] });
+          }
+          const bizFare = fareList[2] || null;
+          if (!bizFare) continue;
+          const ptsNum = Math.round(parseFloat(bizFare.pts.replace('K', '')) * 1000);
+          const dep = depMatch[1];
+          const arr = arrMatch ? arrMatch[1] : '';
+          const dur = durMatch ? durMatch[1] : '';
+          const operator = opMatch ? opMatch[1].trim() : '';
+          const depClean = dep.replace(/:/g, '');
+          const durClean = dur.replace(/\\s/g, '');
+          const stopMatch = s.match(/\\n([A-Z]{3})\\s*(?:-\\s*[A-Z]{3})?\\s*\\n\\+\\s*\\d+h/);
+          const stopAirport = stops === 1 && stopMatch ? stopMatch[1] : '';
+          const fp = stops === 0
+            ? org + '|' + dest + '|' + date + '|' + depClean + '-' + durClean + '-nonstop'
+            : org + '|' + dest + '|' + date + '|' + depClean + '-' + durClean + '-' + stopAirport;
+          if (seen.has(fp)) continue;
+          seen.add(fp);
+          results.push({
+            Fingerprint: fp, Origin: org, Destination: dest, 'Depart Date': date,
+            'Airline(s)': operator, Stops: stops, 'Stop Airports': stopAirport,
+            'Flight Numbers': '', 'Dep Time': dep, 'Arr Time': arr ? arr + '+1' : '',
+            Duration: dur.replace('hr', 'H, ').replace('m', 'M'), Cabin: 'Business',
+            'Business Pct': 100, Points: ptsNum, Fees: bizFare.fee,
+            'Seats Left': (s.match(/(\\d+)\\s+seats?\\s+left/i) || [])[1] || '',
+            'Search URL': url
+          });
+        }
+      }
       return results;
     }""",
-        {"org": org, "dest": dest, "date": date, "url": url},
+        {"org": org, "dest": dest, "date": date, "url": url, "minPct": MIXED_CABIN_MIN_PCT},
     )
 
 
@@ -550,6 +640,11 @@ print(f'Alert count: {{len(alerts)}}')
     print(f"Skipped (invalid route): {len(skipped)}")
     print(f"Failures: {len(failures)}")
     print(f"Total Business flights captured: {len(all_results)}")
+    mixed = [r for r in all_results if r.get("Business Pct", 100) < 100]
+    if mixed:
+        print(f"Mixed-cabin flights included (>={MIXED_CABIN_MIN_PCT}%): {len(mixed)}")
+        for m in mixed:
+            print(f"  {m['Origin']}->{m['Destination']} {m['Depart Date']} {m.get('Flight Numbers','')} ({m['Business Pct']}% biz, {m['Points']:,} pts)")
     print(f"Login count: {login_count}")
 
     if all_results:

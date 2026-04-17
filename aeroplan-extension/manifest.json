@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Aeroplan Award Scanner",
+  "version": "1.0",
+  "description": "Scans Aeroplan award availability across 36 route+date combos",
+  "permissions": ["activeTab", "scripting", "downloads"],
+  "host_permissions": ["https://www.aircanada.com/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
